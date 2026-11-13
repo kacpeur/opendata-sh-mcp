@@ -14,7 +14,14 @@
 - There is no DataStore: `datastore_search` is an unknown action (the portal answers with a bare JSON string). `preview_resource` therefore always downloads the file; `query_datastore` stays for other CKAN portals and reports the missing DataStore plainly.
 - `organization_list?all_fields=true` is capped at 25 entries (131 organizations exist), so `list_organizations` reads the organization facet of `package_search` instead.
 - An nginx firewall rule returns 403 when a double quote is followed anywhere later in the URL by SQL-like words (`created`, `update`, `drop`, `select`). Quoted `fq` filters plus `sort=metadata_created` tripped it, so `search_datasets` sends `sort` first. After a few 403s the portal briefly resets connections.
-- Some CSVs have several sections. KFÜ-Messwerte (series `kfue-7t`, daily releases, 7 days of hourly values) has a units row under the header, values like `7,335e-02`, then a blank line, a station legend and comments. The CSV parser treats the units row and the trailing section as metadata (`units`, `trailing_text`), not data, and German dates (`29.09.2026 00:00:00`) compare chronologically in filters and in min/max.
+- CSVs are rarely "header line, then data". Layouts seen live (2026-11-13, files from 40 publishers), all handled by `table.detect_table`:
+  - Statistikamt Nord (15,615 of 33,145 datasets) exports time series with title lines on top, a group row over a sub-header row (`0-17 Jahre | | 18-24 Jahre` above `Anzahl | % | Anzahl`), and notes below. Titles go to `leading_text`, the two header rows are combined into names like `0-17 Jahre Anzahl`, notes go to `trailing_text`.
+  - KFÜ-Messwerte (series `kfue-7t`) has a units row under the header, values like `7,335e-02`, then a blank line, a station legend and comments. The units row becomes `units`, the legend `trailing_text`.
+  - Badegewässer files have no header row and use `|`. A first row that looks like the data below it (numbers where the column has numbers, texts that repeat further down) means no header; columns are named `col_1`, `col_2`, ...
+  - The delimiter is the candidate that splits the most lines into the same number of fields. `csv.Sniffer` picked `;` for pipe files whose cells contain semicolons.
+  - BASt (about 1,000 datasets) uploads ZIP archives labelled CSV. The data file inside is read; a partial preview download decompresses the first member from its local header.
+  - German dates (`29.09.2026 00:00:00`) compare chronologically in filters and in min/max.
+- Whether `1.234` means 1234 or 1.234 is decided once per column over the whole file, so filters, groups and totals always read a cell the same way.
 - A plain search for a periodic dataset returns its individual releases (2,454 for "KFÜ-Messwerte"), ranked by relevance rather than date. Series are found with `dataset_type:collection` in the query and are flagged `is_series`.
 - Independently, about one connection in four is reset. API calls, downloads and redirects retry transport errors up to 4 times (0.5, 1, 2 s).
 - Everything sits behind the **Anubis** bot filter:
@@ -57,7 +64,8 @@ Also:
 - **Transports:** stdio by default for Claude Desktop and Claude Code. `--transport streamable-http` hosts it as a remote server.
 - **Code layout:**
   - `src/opendata_sh_mcp/ckan.py`: CKAN client (retries, cache, Anubis detection, capped streaming download).
-  - `src/opendata_sh_mcp/preview.py`: CSV and JSON preview parsing.
+  - `src/opendata_sh_mcp/table.py`: finds the table inside raw rows (titles, multi-row headers, units, missing header, notes).
+  - `src/opendata_sh_mcp/preview.py`: delimiter detection, ZIP unwrapping, CSV and JSON preview parsing.
   - `src/opendata_sh_mcp/analyze.py`: whole-file record loading, number parsing and aggregation.
   - `src/opendata_sh_mcp/server.py`: tools, resource, prompt and CLI.
 - **Tests:**

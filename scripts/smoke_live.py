@@ -78,6 +78,25 @@ async def main() -> None:
             r = next((r for r in d["resources"] if r.get("format") == fmt), d["resources"][0])
             show(f"preview_resource {fmt}", await call("preview_resource", {"resource_id": r["id"], "max_rows": 2}))
 
+        # Real layouts the table detection must handle (see DESIGN.md).
+        async def csv_of(dataset: str) -> str:
+            d = show(f"get_dataset {dataset}", await call("get_dataset", {"dataset": dataset}))
+            return next(r["id"] for r in d["resources"] if r.get("format") == "CSV")
+
+        stat = show(
+            "analyze Statistikamt layout",
+            await call("analyze_resource", {"resource_id": await csv_of("bevolkerungsstand-nach-altersgruppen-in-zarpen-am-31-12")}),
+        )
+        if stat and not ("Insgesamt Anzahl" in stat["columns"] and stat.get("leading_text")):
+            failures.append("Statistikamt columns")
+            print(f"FAIL Statistikamt columns: {stat['columns']}")
+        bad = show("analyze headerless pipe file", await call("analyze_resource", {"resource_id": await csv_of("badegewasser-infrastruktur-2023-05-01")}))
+        if bad and bad["columns"] != ["col_1", "col_2", "col_3"]:
+            failures.append("headerless columns")
+        zipped = show("analyze ZIP labelled CSV", await call("analyze_resource", {"resource_id": await csv_of("automatische-zahlstelle-elsensee-2010")}))
+        if zipped and zipped["rows_total"] != 8760:
+            failures.append("zip rows")
+
         show("query_datastore", await call("query_datastore", {"resource_id": res["id"]}), expect_error=True)
 
         series = show("search series", await call("search_datasets", {"query": "dataset_type:collection", "limit": 3}))
