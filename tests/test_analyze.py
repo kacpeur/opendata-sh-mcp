@@ -6,7 +6,14 @@ import json
 
 import pytest
 
-from opendata_sh_mcp.analyze import Metric, RowFilter, analyze, load_records, to_date, to_number
+from opendata_sh_mcp.analyze import (
+    Metric,
+    RowFilter,
+    analyze,
+    load_records,
+    to_date,
+    to_number,
+)
 from opendata_sh_mcp.ckan import PortalError
 
 from .conftest import CSV_BYTES, GEOJSON_BYTES

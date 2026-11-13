@@ -6,24 +6,25 @@ import argparse
 import os
 import re
 import time
-from datetime import datetime, timezone
-from urllib.parse import quote
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ResourceError
 from mcp_types import ToolAnnotations
 from pydantic import Field
 
+from . import __version__
 from .analyze import Metric, RowFilter, analyze, load_records
 from .ckan import CkanClient, PortalError
 from .preview import build_preview
 
 INSTRUCTIONS = """\
 Tools for the open data portal of the German state Schleswig-Holstein
-(opendata.schleswig-holstein.de, a CKAN catalogue with several thousand datasets
+(opendata.schleswig-holstein.de, a CKAN catalogue with about 33,000 datasets
 from state ministries, municipalities such as Kiel and Lübeck, and state agencies).
 
 Typical flow: search_datasets (German keywords work best, e.g. "Badegewässer",
@@ -57,7 +58,7 @@ mcp = MCPServer(
     title="Open Data Schleswig-Holstein",
     instructions=INSTRUCTIONS,
     website_url="https://opendata.schleswig-holstein.de",
-    version="0.1.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
