@@ -21,6 +21,7 @@
   - The delimiter is the candidate that splits the most lines into the same number of fields. `csv.Sniffer` picked `;` for pipe files whose cells contain semicolons.
   - BASt (about 1,000 datasets) uploads ZIP archives labelled CSV. The data file inside is read; a partial preview download decompresses the first member from its local header.
   - German dates (`29.09.2026 00:00:00`) compare chronologically in filters and in min/max.
+- Excel: 3,387 datasets offer XLSX and 840 XLS. `spreadsheet.py` reads both (the reader is chosen by file content, since labels are sometimes wrong) into typed rows and hands them to the same `detect_table`. Numbers stay numbers, so no separator guessing applies. Clean exports (Haushalt, Windkraftanlagen, Denkmalliste) and merged group headers (Norderstedt Einwohnerzahlen) read well. Statistikamt "Statistische Berichte" are print layouts with cover page, imprint and headers five rows deep: the first table-like sheet is chosen and all sheets are listed, but column names on those sheets are best effort.
 - Whether `1.234` means 1234 or 1.234 is decided once per column over the whole file, so filters, groups and totals always read a cell the same way.
 - A plain search for a periodic dataset returns its individual releases (2,454 for "KFÜ-Messwerte"), ranked by relevance rather than date. Series are found with `dataset_type:collection` in the query and are flagged `is_series`.
 - Independently, about one connection in four is reset. API calls, downloads and redirects retry transport errors up to 4 times (0.5, 1, 2 s).
@@ -45,9 +46,9 @@
 | `search_datasets(query, organization, groups, tags, res_format, license_id, modified_since, sort, limit, offset)` | `package_search` | Filters become a quoted Solr `fq`. The sort is an enum (relevance, modified, created, title). Returns `total` and `next_offset` for paging |
 | `get_dataset(dataset)` | `package_show` | Publisher, license and attribution, time range, spatial text, tags, series member count and first 10 ids, resources |
 | `get_resource(resource_id)` | `resource_show` | |
-| `preview_resource(resource_id, max_rows, max_kb)` | `resource_show`, then `datastore_search` or a download | |
+| `preview_resource(resource_id, max_rows, max_kb, sheet)` | `resource_show`, then `datastore_search` or a download | |
 | `query_datastore(resource_id, q, filters, fields, sort, limit, offset)` | `datastore_search` | Only on portals with a DataStore; not the SH portal |
-| `analyze_resource(resource_id, filters, group_by, metrics, sort, max_groups)` | `resource_show`, `package_show`, full download | Exact count/sum/mean/median/min/max, German number parsing, column-level decimal detection, refuses files over the cap, caches the last 3 parsed files for 5 minutes. Verified live: Kiel electricity 2010 to 2023 = 18,357,698 MWh, matching a hand calculation |
+| `analyze_resource(resource_id, filters, group_by, metrics, sort, max_groups, sheet)` | `resource_show`, `package_show`, full download | Exact count/sum/mean/median/min/max, German number parsing, column-level decimal detection, refuses files over the cap, caches the last 3 parsed files for 5 minutes. Verified live: Kiel electricity 2010 to 2023 = 18,357,698 MWh, matching a hand calculation |
 | `preview_series_latest(series, ...)` | `GET /collection/<name>/aktuell` (redirect), `package_show`, download | Picks CSV, then JSON, GeoJSON, XML |
 | `list_organizations()` | `package_search` organization facet | Publishers with at least one dataset, sorted by count |
 | `list_groups()` | `group_list?all_fields=true` | |
@@ -65,6 +66,7 @@ Also:
 - **Code layout:**
   - `src/opendata_sh_mcp/ckan.py`: CKAN client (retries, cache, Anubis detection, capped streaming download).
   - `src/opendata_sh_mcp/table.py`: finds the table inside raw rows (titles, multi-row headers, units, missing header, notes).
+  - `src/opendata_sh_mcp/spreadsheet.py`: Excel workbooks to typed rows, sheet selection.
   - `src/opendata_sh_mcp/preview.py`: delimiter detection, ZIP unwrapping, CSV and JSON preview parsing.
   - `src/opendata_sh_mcp/analyze.py`: whole-file record loading, number parsing and aggregation.
   - `src/opendata_sh_mcp/server.py`: tools, resource, prompt and CLI.

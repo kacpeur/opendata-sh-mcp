@@ -12,7 +12,8 @@ import zlib
 from collections import Counter
 from typing import Any
 
-from .table import detect_table
+from .spreadsheet import is_spreadsheet, pick_sheet, read_workbook
+from .table import Table, detect_table
 
 TEXT_ENCODINGS = ("utf-8-sig", "cp1252", "latin-1")
 
@@ -74,9 +75,11 @@ def parse_csv_table(text: str) -> dict[str, Any]:
     The layout rules live in table.detect_table; this adds delimiter detection.
     """
     delimiter = sniff_delimiter(text)
-    table = detect_table(_read_rows(text, delimiter))
+    return {"delimiter": delimiter, **_table_dict(detect_table(_read_rows(text, delimiter)))}
+
+
+def _table_dict(table: Table) -> dict[str, Any]:
     return {
-        "delimiter": delimiter,
         "header": table.header,
         "units": table.units,
         "body": table.body,
@@ -114,6 +117,42 @@ def preview_csv(text: str, max_rows: int, truncated: bool) -> dict[str, Any]:
         "rows_in_sample": len(body),
         "sample_truncated": truncated,
         **table_extras(table),
+    }
+
+
+def parse_spreadsheet(data: bytes, sheet: str | None = None) -> dict[str, Any]:
+    """The table on one sheet of a workbook, plus the list of sheets so another can be asked for.
+
+    Raises SpreadsheetError with a message fit for the model.
+    """
+    sheets = read_workbook(data)
+    index = pick_sheet(sheets, sheet)
+    name, grid = sheets[index]
+    out = _table_dict(detect_table(grid))
+    out["sheet"] = name
+    if len(sheets) > 1:
+        out["sheets"] = [{"name": n, "rows": len(g)} for n, g in sheets]
+    return out
+
+
+def sheet_extras(table: dict[str, Any]) -> dict[str, Any]:
+    return {k: table[k] for k in ("sheet", "sheets") if k in table}
+
+
+def preview_spreadsheet(data: bytes, max_rows: int, truncated: bool, sheet: str | None) -> dict[str, Any]:
+    if truncated:
+        return {"kind": "spreadsheet", "note": "the workbook is larger than the preview limit; analyze_resource reads it whole"}
+    table = parse_spreadsheet(data, sheet)
+    header, body = table["header"], table["body"]
+    return {
+        "kind": "spreadsheet",
+        **sheet_extras(table),
+        "columns": header,
+        "rows": [dict(zip(header, r)) for r in body[:max_rows]],
+        "rows_in_sample": len(body),
+        "sample_truncated": False,
+        **table_extras(table),
+        **({} if header else {"note": "this sheet is empty; pass sheet= to read another one"}),
     }
 
 
@@ -200,9 +239,13 @@ def preview_json(text: str, max_rows: int, truncated: bool) -> dict[str, Any]:
     return {"kind": "json", "value": data}
 
 
-def build_preview(data: bytes, fmt: str, content_type: str, max_rows: int, truncated: bool) -> dict[str, Any]:
+def build_preview(
+    data: bytes, fmt: str, content_type: str, max_rows: int, truncated: bool, sheet: str | None = None
+) -> dict[str, Any]:
     fmt = (fmt or "").lower()
     ctype = (content_type or "").lower()
+    if is_spreadsheet(fmt, ctype):
+        return preview_spreadsheet(data, max_rows, truncated, sheet)
     try:
         data, truncated, archive = unwrap_zip(data, fmt, truncated, PREVIEW_UNPACK_BYTES)
     except ArchiveError as exc:

@@ -71,7 +71,7 @@ def test_load_json_not_records():
 
 def test_load_unsupported_format():
     with pytest.raises(PortalError, match="cannot be analysed"):
-        load_records(b"PK\x03\x04", "xlsx", "application/vnd.ms-excel")
+        load_records(b"%PDF-1.7", "pdf", "application/pdf")
 
 
 ROWS = load_records(CSV_BYTES, "csv", "")

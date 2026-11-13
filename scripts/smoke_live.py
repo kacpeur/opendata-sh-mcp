@@ -97,6 +97,16 @@ async def main() -> None:
         if zipped and zipped["rows_total"] != 8760:
             failures.append("zip rows")
 
+        haushalt = show("get_dataset haushalt-sh-2021", await call("get_dataset", {"dataset": "haushalt-sh-2021"}))
+        xlsx_id = next(r["id"] for r in haushalt["resources"] if r.get("format") == "XLSX")
+        show("preview_resource XLSX", await call("preview_resource", {"resource_id": xlsx_id, "max_rows": 2}))
+        budget = show(
+            "analyze_resource XLSX",
+            await call("analyze_resource", {"resource_id": xlsx_id, "metrics": [{"agg": "sum", "column": "Ansatz 2021 T€"}]}),
+        )
+        if budget and budget["rows_total"] != 5974:
+            failures.append("xlsx rows")
+
         show("query_datastore", await call("query_datastore", {"resource_id": res["id"]}), expect_error=True)
 
         series = show("search series", await call("search_datasets", {"query": "dataset_type:collection", "limit": 3}))

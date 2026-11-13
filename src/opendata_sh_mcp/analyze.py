@@ -13,7 +13,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from .ckan import PortalError
-from .preview import ArchiveError, decode, parse_csv_table, table_extras, unwrap_zip
+from .preview import ArchiveError, decode, parse_csv_table, parse_spreadsheet, sheet_extras, table_extras, unwrap_zip
+from .spreadsheet import SpreadsheetError, is_spreadsheet
 
 FilterOp = Literal["eq", "ne", "gt", "ge", "lt", "le", "contains", "in", "empty", "not_empty"]
 Agg = Literal["count", "count_distinct", "sum", "mean", "median", "min", "max"]
@@ -119,15 +120,29 @@ def to_date(value: Any) -> datetime | None:
 
 
 def load_records(
-    data: bytes, fmt: str, content_type: str, info: dict[str, Any] | None = None, max_unpacked: int = 200 * 1024 * 1024
+    data: bytes,
+    fmt: str,
+    content_type: str,
+    info: dict[str, Any] | None = None,
+    max_unpacked: int = 200 * 1024 * 1024,
+    sheet: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Turn a whole CSV, JSON array of objects or GeoJSON file into a list of flat records.
+    """Turn a whole CSV, Excel sheet, JSON array of objects or GeoJSON file into a list of flat records.
 
     For CSV, title lines, a units row and any trailing section are left out of the records and
     put in info. A ZIP labelled as one of these formats is opened (up to max_unpacked bytes).
     """
     fmt = (fmt or "").lower()
     ctype = (content_type or "").lower()
+    if is_spreadsheet(fmt, ctype):
+        try:
+            table = parse_spreadsheet(data, sheet)
+        except SpreadsheetError as exc:
+            raise PortalError(str(exc)) from exc
+        if info is not None:
+            info.update(sheet_extras(table))
+            info.update(table_extras(table))
+        return [dict(zip(table["header"], r)) for r in table["body"]]
     try:
         data, _, archive = unwrap_zip(data, fmt, False, max_unpacked, strict=True)
     except ArchiveError as exc:
@@ -158,7 +173,7 @@ def load_records(
         if isinstance(doc, list) and all(isinstance(i, dict) for i in doc):
             return doc
         raise PortalError("JSON file is not a list of records or a GeoJSON FeatureCollection; use preview_resource to inspect it")
-    raise PortalError(f"format '{fmt or ctype}' cannot be analysed; supported are CSV, JSON records and GeoJSON")
+    raise PortalError(f"format '{fmt or ctype}' cannot be analysed; supported are CSV, Excel, JSON records and GeoJSON")
 
 
 def _cell(row: dict[str, Any], column: str) -> Any:

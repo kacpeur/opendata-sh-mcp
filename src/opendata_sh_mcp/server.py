@@ -21,6 +21,7 @@ from . import __version__
 from .analyze import Metric, RowFilter, analyze, load_records
 from .ckan import CkanClient, PortalError
 from .preview import build_preview
+from .spreadsheet import SpreadsheetError, is_spreadsheet
 
 INSTRUCTIONS = """\
 Tools for the open data portal of the German state Schleswig-Holstein
@@ -29,7 +30,7 @@ from state ministries, municipalities such as Kiel and Lübeck, and state agenci
 
 Typical flow: search_datasets (German keywords work best, e.g. "Badegewässer",
 "Haushalt", "Verkehr Kiel") -> get_dataset for resources -> preview_resource to
-peek at CSV/JSON contents (query_datastore only for resources with datastore_active).
+peek at CSV/Excel/JSON contents (query_datastore only for resources with datastore_active).
 Data series (Datenserien) bundle periodic releases (daily measurements, monthly reports); a plain
 search returns hundreds of individual releases. To get the newest one, find the series with
 query "<topic> dataset_type:collection" (results marked is_series) and call preview_series_latest,
@@ -310,8 +311,11 @@ async def preview_resource(
     resource_id: Annotated[str, Field(description="Resource id from get_dataset")],
     max_rows: Annotated[int, Field(ge=1, le=200)] = 20,
     max_kb: Annotated[int, Field(ge=16, le=5120, description="Download at most this many KiB")] = 512,
+    sheet: Annotated[str | None, Field(description="Excel only: sheet name or 1-based position. Default: first sheet holding a table")] = None,
 ) -> dict[str, Any]:
-    """Peek into a resource's contents: parsed rows for CSV, structure for JSON/GeoJSON, raw head for XML.
+    """Peek into a resource's contents: parsed rows for CSV and Excel, structure for JSON/GeoJSON, raw head for XML.
+
+    An Excel workbook lists its sheets under "sheets"; pass sheet= to read another one.
 
     Uses the CKAN DataStore when the resource is loaded there, otherwise downloads the
     first max_kb of the file.
@@ -336,9 +340,22 @@ async def preview_resource(
     url = res.get("url")
     if not url:
         raise PortalError("resource has no download URL")
-    data, ctype, truncated = await client.download(url, max_kb * 1024)
-    preview = build_preview(data, meta["format"] or "", ctype, max_rows, truncated)
+    preview = await _download_preview(url, meta["format"] or "", max_rows, max_kb, sheet)
     return {"resource": meta, "read_from": "download", "source": source, **_sample_note(preview), **preview}
+
+
+# A workbook cannot be read from its first bytes (it is a ZIP with the index at the end), so
+# previews fetch it whole up to this size. Excel files on the portal are mostly under 1 MB.
+SPREADSHEET_PREVIEW_BYTES = 20 * 1024 * 1024
+
+
+async def _download_preview(url: str, fmt: str, max_rows: int, max_kb: int, sheet: str | None = None) -> dict[str, Any]:
+    limit = SPREADSHEET_PREVIEW_BYTES if is_spreadsheet(fmt, "") else max_kb * 1024
+    data, ctype, truncated = await client.download(url, limit)
+    try:
+        return build_preview(data, fmt, ctype, max_rows, truncated, sheet)
+    except SpreadsheetError as exc:
+        raise PortalError(str(exc)) from exc
 
 
 def _sample_note(preview: dict[str, Any]) -> dict[str, Any]:
@@ -403,9 +420,10 @@ _RECORDS_CACHE: dict[str, tuple[float, tuple[list[dict[str, Any]], dict[str, Any
 _RECORDS_CACHE_SIZE = 3
 
 
-async def _load_full(url: str, fmt: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+async def _load_full(url: str, fmt: str, sheet: str | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     now = time.monotonic()
-    hit = _RECORDS_CACHE.get(url)
+    key = f"{url}#{sheet or ''}"
+    hit = _RECORDS_CACHE.get(key)
     if hit and hit[0] > now:
         return hit[1]
     cap = int(MAX_ANALYZE_MB * 1024 * 1024)
@@ -416,9 +434,9 @@ async def _load_full(url: str, fmt: str) -> tuple[list[dict[str, Any]], dict[str
             "(raise OPENDATA_SH_MAX_ANALYZE_MB to allow bigger files)"
         )
     info: dict[str, Any] = {}
-    records = load_records(data, fmt, ctype, info, max_unpacked=4 * cap)
-    _RECORDS_CACHE.pop(url, None)
-    _RECORDS_CACHE[url] = (now + client.cache_ttl, (records, info))
+    records = load_records(data, fmt, ctype, info, max_unpacked=4 * cap, sheet=sheet)
+    _RECORDS_CACHE.pop(key, None)
+    _RECORDS_CACHE[key] = (now + client.cache_ttl, (records, info))
     while len(_RECORDS_CACHE) > _RECORDS_CACHE_SIZE:
         _RECORDS_CACHE.pop(next(iter(_RECORDS_CACHE)))
     return records, info
@@ -426,7 +444,7 @@ async def _load_full(url: str, fmt: str) -> tuple[list[dict[str, Any]], dict[str
 
 @mcp.tool(annotations=READ_ONLY)
 async def analyze_resource(
-    resource_id: Annotated[str, Field(description="Resource id from get_dataset (CSV, JSON records or GeoJSON)")],
+    resource_id: Annotated[str, Field(description="Resource id from get_dataset (CSV, Excel, JSON records or GeoJSON)")],
     filters: Annotated[
         list[RowFilter] | None,
         Field(description='Row filters, all must match, e.g. [{"column": "Jahr", "op": "ge", "value": 2020}]'),
@@ -440,6 +458,7 @@ async def analyze_resource(
         Literal["value_desc", "value_asc", "key"], Field(description="Group order: by the first metric, or by group key")
     ] = "value_desc",
     max_groups: Annotated[int, Field(ge=1, le=500)] = 50,
+    sheet: Annotated[str | None, Field(description="Excel only: sheet name or 1-based position. Default: first sheet holding a table")] = None,
 ) -> dict[str, Any]:
     """Compute exact figures over the WHOLE file: filter rows, group them, and count, sum, average,
     median, min or max columns. Use this for every number you report instead of estimating from a preview.
@@ -456,12 +475,12 @@ async def analyze_resource(
     meta = resource_summary(res)
     if not res.get("url"):
         raise PortalError("resource has no download URL")
-    records, info = await _load_full(res["url"], meta["format"] or "")
+    records, info = await _load_full(res["url"], meta["format"] or "", sheet)
     result = analyze(records, filters or [], group_by, metrics, sort, max_groups)
     return {"resource": meta, "source": source, "complete": True, **result, **info}
 
 
-_PREVIEW_ORDER = ("CSV", "JSON", "GEOJSON", "XML", "TXT")
+_PREVIEW_ORDER = ("CSV", "JSON", "GEOJSON", "XLSX", "XLS", "XML", "TXT")
 
 
 def _best_resource(resources: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -503,8 +522,7 @@ async def preview_series_latest(
             "note": "the newest release has no downloadable resource",
         }
     meta = resource_summary(res)
-    data, ctype, truncated = await client.download(res["url"], max_kb * 1024)
-    preview = build_preview(data, meta["format"] or "", ctype, max_rows, truncated)
+    preview = await _download_preview(res["url"], meta["format"] or "", max_rows, max_kb)
     return {
         "series": series,
         "latest": latest,
