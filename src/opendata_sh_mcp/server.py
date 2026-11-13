@@ -18,7 +18,7 @@ from mcp_types import ToolAnnotations
 from pydantic import Field
 
 from . import __version__
-from .analyze import Metric, RowFilter, analyze, load_records
+from .analyze import DescriptorError, Metric, RowFilter, analyze, load_records
 from .ckan import CkanClient, PortalError
 from .preview import build_preview
 from .spreadsheet import SpreadsheetError, is_spreadsheet
@@ -30,7 +30,7 @@ from state ministries, municipalities such as Kiel and Lübeck, and state agenci
 
 Typical flow: search_datasets (German keywords work best, e.g. "Badegewässer",
 "Haushalt", "Verkehr Kiel") -> get_dataset for resources -> preview_resource to
-peek at CSV/Excel/JSON contents (query_datastore only for resources with datastore_active).
+peek at CSV/Excel/JSON contents.
 Data series (Datenserien) bundle periodic releases (daily measurements, monthly reports); a plain
 search returns hundreds of individual releases. To get the newest one, find the series with
 query "<topic> dataset_type:collection" (results marked is_series) and call preview_series_latest,
@@ -104,7 +104,6 @@ def resource_summary(res: dict[str, Any]) -> dict[str, Any]:
         "url": res.get("url"),
         "size": res.get("size"),
         "last_modified": res.get("last_modified") or res.get("metadata_modified"),
-        "datastore_active": bool(res.get("datastore_active")),
     }
 
 
@@ -194,6 +193,15 @@ async def _resource_with_source(resource_id: str) -> tuple[dict[str, Any], dict[
     except PortalError:
         pkg = None  # provenance is best effort; the resource itself was found
     return res, source_block(pkg, res)
+
+
+async def _data_resource_id(res: dict[str, Any], url: str) -> str | None:
+    """Id of the resource in the same dataset that a descriptor file points at."""
+    try:
+        pkg = await client.action("package_show", id=res["package_id"]) if res.get("package_id") else {}
+    except PortalError:
+        return None
+    return next((r.get("id") for r in pkg.get("resources") or [] if r.get("url") == url and r.get("id") != res.get("id")), None)
 
 
 def _q(value: str) -> str:
@@ -315,33 +323,18 @@ async def preview_resource(
 ) -> dict[str, Any]:
     """Peek into a resource's contents: parsed rows for CSV and Excel, structure for JSON/GeoJSON, raw head for XML.
 
-    An Excel workbook lists its sheets under "sheets"; pass sheet= to read another one.
-
-    Uses the CKAN DataStore when the resource is loaded there, otherwise downloads the
-    first max_kb of the file.
+    Downloads the first max_kb of the file (a whole Excel workbook). An Excel workbook lists
+    its sheets under "sheets"; pass sheet= to read another one.
     """
     res, source = await _resource_with_source(resource_id)
     meta = resource_summary(res)
-    if res.get("datastore_active"):
-        try:
-            ds = await client.action("datastore_search", cache=False, resource_id=resource_id, limit=max_rows)
-            rows = ds.get("records", [])
-            return {
-                "resource": meta,
-                "read_from": "datastore",
-                "source": source,
-                "total_rows": ds.get("total"),
-                "sample_note": f"first {len(rows)} of {ds.get('total')} rows; use analyze_resource for exact figures",
-                "columns": [f["id"] for f in ds.get("fields", []) if f["id"] != "_id"],
-                "rows": rows,
-            }
-        except PortalError:
-            pass  # fall back to downloading the file
     url = res.get("url")
     if not url:
         raise PortalError("resource has no download URL")
     preview = await _download_preview(url, meta["format"] or "", max_rows, max_kb, sheet)
-    return {"resource": meta, "read_from": "download", "source": source, **_sample_note(preview), **preview}
+    if preview.get("kind") == "descriptor" and (target := await _data_resource_id(res, preview["describes_url"])):
+        preview["data_resource_id"] = target
+    return {"resource": meta, "source": source, **_sample_note(preview), **preview}
 
 
 # A workbook cannot be read from its first bytes (it is a ZIP with the index at the end), so
@@ -370,48 +363,6 @@ def _sample_note(preview: dict[str, Any]) -> dict[str, Any]:
     else:
         note = f"first {shown} of {preview.get('feature_count', shown)} features"
     return {"sample_note": note}
-
-
-@mcp.tool(annotations=READ_ONLY)
-async def query_datastore(
-    resource_id: Annotated[str, Field(description="Resource id whose datastore_active is true")],
-    q: Annotated[str | None, Field(description="Full-text search across all fields")] = None,
-    filters: Annotated[dict[str, Any] | None, Field(description='Exact-match column filters, e.g. {"Jahr": "2023"}')] = None,
-    fields: Annotated[list[str] | None, Field(description="Columns to return (default all)")] = None,
-    sort: Annotated[str | None, Field(description='e.g. "Jahr desc"')] = None,
-    limit: Annotated[int, Field(ge=1, le=1000)] = 100,
-    offset: Annotated[int, Field(ge=0)] = 0,
-) -> dict[str, Any]:
-    """Query tabular rows of a resource stored in the CKAN DataStore (filter, search, sort, page).
-
-    Only works for resources with datastore_active=true. The Schleswig-Holstein portal currently
-    runs without a DataStore, so use preview_resource there.
-    """
-    import json
-
-    try:
-        ds = await client.action(
-        "datastore_search",
-            cache=False,
-            resource_id=resource_id,
-            q=q,
-            filters=json.dumps(filters) if filters else None,
-            fields=",".join(fields) if fields else None,
-            sort=sort,
-            limit=limit,
-            offset=offset,
-        )
-    except PortalError as exc:
-        if "action name not known" in str(exc).lower():
-            raise PortalError("this portal has no DataStore; use preview_resource to read the file instead") from exc
-        raise
-    _, source = await _resource_with_source(resource_id)
-    return {
-        "source": source,
-        "total_rows": ds.get("total"),
-        "columns": [{"id": f["id"], "type": f.get("type")} for f in ds.get("fields", []) if f["id"] != "_id"],
-        "rows": ds.get("records", []),
-    }
 
 
 MAX_ANALYZE_MB = float(os.environ.get("OPENDATA_SH_MAX_ANALYZE_MB", "50"))
@@ -475,7 +426,12 @@ async def analyze_resource(
     meta = resource_summary(res)
     if not res.get("url"):
         raise PortalError("resource has no download URL")
-    records, info = await _load_full(res["url"], meta["format"] or "", sheet)
+    try:
+        records, info = await _load_full(res["url"], meta["format"] or "", sheet)
+    except DescriptorError as exc:
+        target = await _data_resource_id(res, exc.url)
+        hint = f"call analyze_resource with resource_id '{target}' instead" if target else "analyse the dataset's data file instead"
+        raise PortalError(f"this JSON file is a descriptor for {exc.url}, not data; {hint}") from exc
     result = analyze(records, filters or [], group_by, metrics, sort, max_groups)
     return {"resource": meta, "source": source, "complete": True, **result, **info}
 

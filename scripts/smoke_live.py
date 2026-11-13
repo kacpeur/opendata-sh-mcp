@@ -107,7 +107,12 @@ async def main() -> None:
         if budget and budget["rows_total"] != 5974:
             failures.append("xlsx rows")
 
-        show("query_datastore", await call("query_datastore", {"resource_id": res["id"]}), expect_error=True)
+        epay = show("get_dataset epayment-2026-10", await call("get_dataset", {"dataset": "epayment-2026-10"}))
+        tdr = next(r["id"] for r in epay["resources"] if r.get("format") == "JSON")
+        desc = show("preview_resource descriptor", await call("preview_resource", {"resource_id": tdr}))
+        if desc and not (desc.get("kind") == "descriptor" and desc.get("data_resource_id")):
+            failures.append("descriptor preview")
+        show("analyze_resource descriptor", await call("analyze_resource", {"resource_id": tdr}), expect_error=True)
 
         series = show("search series", await call("search_datasets", {"query": "dataset_type:collection", "limit": 3}))
         sname = series["datasets"][0]["name"]

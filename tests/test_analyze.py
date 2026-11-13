@@ -202,3 +202,21 @@ def test_german_date_filter_compares_chronologically():
 def test_to_date(raw, expected):
     d = to_date(raw)
     assert (d.isoformat() if d else None) == expected
+
+
+def test_json_records_keyed_by_id():
+    doc = b'{"010580005005": {"amount_t": 189, "amount_i": 10}, "010580034034": {"amount_t": 212, "amount_i": 4}}'
+    rows = load_records(doc, "json", "")
+    assert rows[0] == {"key": "010580005005", "amount_t": 189, "amount_i": 10}
+    assert analyze(rows, metrics=[Metric(agg="sum", column="amount_t")])["result"] == {"sum(amount_t)": 401}
+
+
+def test_descriptor_with_schema_url_is_not_data():
+    doc = b'{"name": "x.csv", "type": "table", "path": "https://hsi-sh.de/pegel/x.csv", "format": "csv", "schema": "https://example.org/s.json"}'
+    with pytest.raises(PortalError, match="descriptor for https://hsi-sh.de/pegel/x.csv"):
+        load_records(doc, "json", "")
+
+
+def test_plain_object_with_a_path_key_is_not_a_descriptor():
+    with pytest.raises(PortalError, match="not a list of records"):
+        load_records(b'{"path": "/tmp/x", "wert": 3}', "json", "")

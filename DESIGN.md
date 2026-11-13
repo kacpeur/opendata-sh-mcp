@@ -11,7 +11,7 @@
 - Data series ("Datenserien", `type: collection`, about 136 of them) link periodic releases to a parent dataset via `child_of` relationships; big series have 100+ members. `/collection/<name>/aktuell` redirects to the newest release. `/collection/<name>/aktuell.csv` only works when that release has a CSV (404 otherwise, 500 for unknown series), so the server follows the redirect instead.
 - Resource `format` values are EU vocabulary URIs (`http://publications.europa.eu/resource/authority/file-type/CSV`); the server reduces them to `CSV`. Search filters (`res_format:"CSV"`) match either case.
 - Also offered: a DCAT feed (`/catalog.ttl`, `/catalog.jsonld`, `/dataset/<name>.rdf`). The server doesn't use it; the action API returns the same data and is easier to query.
-- There is no DataStore: `datastore_search` is an unknown action (the portal answers with a bare JSON string). `preview_resource` therefore always downloads the file; `query_datastore` stays for other CKAN portals and reports the missing DataStore plainly.
+- There is no DataStore: `datastore_search` is an unknown action (the portal answers with a bare JSON string). `preview_resource` therefore always downloads the file. The `query_datastore` tool was removed on 2026-11-13: a tool that can only fail costs context in every session and invites wrong calls.
 - `organization_list?all_fields=true` is capped at 25 entries (131 organizations exist), so `list_organizations` reads the organization facet of `package_search` instead.
 - An nginx firewall rule returns 403 when a double quote is followed anywhere later in the URL by SQL-like words (`created`, `update`, `drop`, `select`). Quoted `fq` filters plus `sort=metadata_created` tripped it, so `search_datasets` sends `sort` first. After a few 403s the portal briefly resets connections.
 - CSVs are rarely "header line, then data". Layouts seen live (2026-11-13, files from 40 publishers), all handled by `table.detect_table`:
@@ -21,6 +21,7 @@
   - The delimiter is the candidate that splits the most lines into the same number of fields. `csv.Sniffer` picked `;` for pipe files whose cells contain semicolons.
   - BASt (about 1,000 datasets) uploads ZIP archives labelled CSV. The data file inside is read; a partial preview download decompresses the first member from its local header.
   - German dates (`29.09.2026 00:00:00`) compare chronologically in filters and in min/max.
+- Most of the 7,351 JSON resources are not data but Frictionless Data Resource descriptors: a few hundred bytes with `path` (the sibling CSV), `dialect` and `schema`. `preview_resource` reports them as `kind: descriptor` with `data_resource_id`; `analyze_resource` refuses them and names the resource to use. JSON objects keyed by id (`{"0105...": {...}}`) are read as records with a `key` column.
 - Excel: 3,387 datasets offer XLSX and 840 XLS. `spreadsheet.py` reads both (the reader is chosen by file content, since labels are sometimes wrong) into typed rows and hands them to the same `detect_table`. Numbers stay numbers, so no separator guessing applies. Clean exports (Haushalt, Windkraftanlagen, Denkmalliste) and merged group headers (Norderstedt Einwohnerzahlen) read well. Statistikamt "Statistische Berichte" are print layouts with cover page, imprint and headers five rows deep: the first table-like sheet is chosen and all sheets are listed, but column names on those sheets are best effort.
 - Whether `1.234` means 1234 or 1.234 is decided once per column over the whole file, so filters, groups and totals always read a cell the same way.
 - A plain search for a periodic dataset returns its individual releases (2,454 for "KFÜ-Messwerte"), ranked by relevance rather than date. Series are found with `dataset_type:collection` in the query and are flagged `is_series`.
@@ -46,8 +47,7 @@
 | `search_datasets(query, organization, groups, tags, res_format, license_id, modified_since, sort, limit, offset)` | `package_search` | Filters become a quoted Solr `fq`. The sort is an enum (relevance, modified, created, title). Returns `total` and `next_offset` for paging |
 | `get_dataset(dataset)` | `package_show` | Publisher, license and attribution, time range, spatial text, tags, series member count and first 10 ids, resources |
 | `get_resource(resource_id)` | `resource_show` | |
-| `preview_resource(resource_id, max_rows, max_kb, sheet)` | `resource_show`, then `datastore_search` or a download | |
-| `query_datastore(resource_id, q, filters, fields, sort, limit, offset)` | `datastore_search` | Only on portals with a DataStore; not the SH portal |
+| `preview_resource(resource_id, max_rows, max_kb, sheet)` | `resource_show`, then a download | |
 | `analyze_resource(resource_id, filters, group_by, metrics, sort, max_groups, sheet)` | `resource_show`, `package_show`, full download | Exact count/sum/mean/median/min/max, German number parsing, column-level decimal detection, refuses files over the cap, caches the last 3 parsed files for 5 minutes. Verified live: Kiel electricity 2010 to 2023 = 18,357,698 MWh, matching a hand calculation |
 | `preview_series_latest(series, ...)` | `GET /collection/<name>/aktuell` (redirect), `package_show`, download | Picks CSV, then JSON, GeoJSON, XML |
 | `list_organizations()` | `package_search` organization facet | Publishers with at least one dataset, sorted by count |

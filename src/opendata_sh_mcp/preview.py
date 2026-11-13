@@ -208,6 +208,35 @@ def unwrap_zip(data: bytes, fmt: str, truncated: bool, max_out: int, strict: boo
     return payload[:max_out], len(payload) > max_out, info
 
 
+DESCRIPTOR_NOTE = (
+    "This JSON file is not data. It is a descriptor (Frictionless Data Resource) for the file at "
+    "describes_url; preview or analyse that resource instead."
+)
+
+
+def read_descriptor(doc: Any) -> dict[str, Any] | None:
+    """Recognise a Frictionless Data Resource descriptor.
+
+    Most JSON resources on the portal are these: a few hundred bytes naming the sibling CSV
+    ("path") with its dialect and schema. They are metadata, and treating them as data only
+    produces confusing errors.
+    """
+    if not isinstance(doc, dict):
+        return None
+    path = doc.get("path")
+    if not isinstance(path, str) or not path.startswith(("http://", "https://")):
+        return None
+    if not {"schema", "dialect", "profile", "mediatype", "format", "encoding"} & set(doc):
+        return None
+    out: dict[str, Any] = {"describes_url": path}
+    schema = doc.get("schema")
+    if isinstance(schema, str):
+        out["schema_url"] = schema
+    elif isinstance(schema, dict) and isinstance(schema.get("fields"), list):
+        out["fields"] = [{"name": f.get("name"), "type": f.get("type")} for f in schema["fields"] if isinstance(f, dict)][:200]
+    return out
+
+
 def preview_json(text: str, max_rows: int, truncated: bool) -> dict[str, Any]:
     if truncated:
         return {"kind": "json", "note": "file larger than the preview limit; raw head shown", "head": text[:4000]}
@@ -215,6 +244,8 @@ def preview_json(text: str, max_rows: int, truncated: bool) -> dict[str, Any]:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
         return {"kind": "json", "note": f"invalid JSON: {exc}", "head": text[:4000]}
+    if descriptor := read_descriptor(data):
+        return {"kind": "descriptor", "note": DESCRIPTOR_NOTE, **descriptor}
     if isinstance(data, dict) and data.get("type") == "FeatureCollection":
         feats = data.get("features") or []
         return {

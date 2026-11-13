@@ -11,8 +11,7 @@ a CKAN catalogue run by the state.
 | `search_datasets` | Full-text search with filters (organization, category, tags, format, license, modified since), sorting and paging |
 | `get_dataset` | Full metadata of one dataset: publisher, license, time range, tags, resources |
 | `get_resource` | Metadata of one file or service endpoint |
-| `preview_resource` | Parsed first rows of CSV (detects delimiter, encoding, title lines, two-row headers, missing headers, ZIP-wrapped files) and Excel sheets (`sheet` picks one), structure of JSON/GeoJSON, head of XML. Uses the DataStore on portals that have one |
-| `query_datastore` | Filter, search, sort and page rows of a DataStore table (the SH portal has no DataStore, so this reports that clearly; kept for other CKAN portals) |
+| `preview_resource` | Parsed first rows of CSV (detects delimiter, encoding, title lines, two-row headers, missing headers, ZIP-wrapped files) and Excel sheets (`sheet` picks one), structure of JSON/GeoJSON, head of XML. A JSON descriptor file is recognised and points to the data resource it describes |
 | `list_organizations` | Publishers with dataset counts |
 | `list_groups` | Thematic categories with dataset counts |
 | `preview_series_latest` | Newest release of a data series (Datenserie) via `/collection/<name>/aktuell`, previewing its best file (CSV first) |
