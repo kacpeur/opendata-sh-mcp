@@ -13,11 +13,19 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from .ckan import PortalError
-from .preview import ArchiveError, decode, parse_csv_table, parse_spreadsheet, sheet_extras, table_extras, unwrap_zip
+from .preview import ArchiveError, decode, parse_csv_table, parse_spreadsheet, read_descriptor, sheet_extras, table_extras, unwrap_zip
 from .spreadsheet import SpreadsheetError, is_spreadsheet
 
 FilterOp = Literal["eq", "ne", "gt", "ge", "lt", "le", "contains", "in", "empty", "not_empty"]
 Agg = Literal["count", "count_distinct", "sum", "mean", "median", "min", "max"]
+
+
+class DescriptorError(PortalError):
+    """The file is a descriptor pointing at the real data file, whose URL is in ``url``."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(f"this JSON file is a descriptor for {url}, not data; analyse that resource instead")
+        self.url = url
 
 
 class RowFilter(BaseModel):
@@ -163,6 +171,8 @@ def load_records(
             doc = json.loads(decode(data))
         except json.JSONDecodeError as exc:
             raise PortalError(f"file is not valid JSON: {exc}") from exc
+        if descriptor := read_descriptor(doc):
+            raise DescriptorError(descriptor["describes_url"])
         if isinstance(doc, dict) and doc.get("type") == "FeatureCollection":
             return [dict(f.get("properties") or {}) for f in doc.get("features") or []]
         if isinstance(doc, dict):
@@ -172,6 +182,9 @@ def load_records(
                 doc = lists[0]
         if isinstance(doc, list) and all(isinstance(i, dict) for i in doc):
             return doc
+        if isinstance(doc, dict) and len(doc) >= 2 and all(isinstance(v, dict) for v in doc.values()):
+            # records keyed by an id, e.g. {"010580005005": {"amount_t": 189, ...}, ...}
+            return [{"key": k, **v} for k, v in doc.items()]
         raise PortalError("JSON file is not a list of records or a GeoJSON FeatureCollection; use preview_resource to inspect it")
     raise PortalError(f"format '{fmt or ctype}' cannot be analysed; supported are CSV, Excel, JSON records and GeoJSON")
 

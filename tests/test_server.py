@@ -19,7 +19,6 @@ from .conftest import (
     CSV_BYTES,
     CSV_RESOURCE,
     DATASTORE_RESOURCE,
-    DATASTORE_SEARCH_RESULT,
     GEOJSON_BYTES,
     GEOJSON_RESOURCE,
     GROUP_LIST,
@@ -37,7 +36,6 @@ EXPECTED_TOOLS = {
     "get_dataset",
     "get_resource",
     "preview_resource",
-    "query_datastore",
     "preview_series_latest",
     "list_organizations",
     "list_groups",
@@ -76,7 +74,7 @@ async def test_list_tools():
     async with Client(server.mcp) as c:
         tools = (await c.list_tools()).tools
     assert {t.name for t in tools} == EXPECTED_TOOLS
-    assert len(tools) == len(EXPECTED_TOOLS) == 10
+    assert len(tools) == len(EXPECTED_TOOLS) == 9
     for t in tools:
         assert t.annotations.read_only_hint is True
         assert t.annotations.open_world_hint is True
@@ -342,9 +340,7 @@ async def test_get_dataset(portal):
         "url": CSV_RESOURCE["url"],
         "size": 2048,
         "last_modified": "2024-03-05T10:00:00.000000",
-        "datastore_active": False,
     }
-    assert res[DATASTORE_RESOURCE["id"]]["datastore_active"] is True
     assert res[DATASTORE_RESOURCE["id"]]["last_modified"] == "2024-03-06T08:00:00.000000"
     assert res[GEOJSON_RESOURCE["id"]]["format"] == "GEOJSON"
     wms = res[WMS_RESOURCE["id"]]
@@ -396,7 +392,6 @@ async def test_get_resource(portal):
         "url": CSV_RESOURCE["url"],
         "size": 2048,
         "last_modified": "2024-03-05T10:00:00.000000",
-        "datastore_active": False,
         "description": "Einwohnerinnen und Einwohner mit Hauptwohnsitz je Stadtteil.",
         "mimetype": "text/csv",
         "dataset_id": CSV_RESOURCE["package_id"],
@@ -408,7 +403,7 @@ async def test_get_resource_datastore_and_nulls(portal):
     dataset_for_source(portal)
     portal.get(API + "resource_show").respond(json=ok(DATASTORE_RESOURCE))
     out = data(await call("get_resource", {"resource_id": DATASTORE_RESOURCE["id"]}))
-    assert out["datastore_active"] is True
+    assert "datastore_active" not in out
     assert "size" not in out
 
 
@@ -432,7 +427,7 @@ async def test_preview_csv_download(portal):
     )
     out = data(await call("preview_resource", {"resource_id": CSV_RESOURCE["id"], "max_rows": 2}))
     assert dl.call_count == 1
-    assert out["read_from"] == "download"
+    assert "read_from" not in out
     assert out["resource"]["id"] == CSV_RESOURCE["id"]
     assert out["kind"] == "csv" and out["delimiter"] == ";"
     assert out["columns"][-1] == "Fläche km²"
@@ -470,43 +465,6 @@ async def test_preview_geojson_download(portal):
     assert out["features"][1]["properties"]["name"] == "Düsternbrook"
 
 
-async def test_preview_datastore(portal):
-    dataset_for_source(portal)
-    portal.get(API + "resource_show").respond(json=ok(DATASTORE_RESOURCE))
-    ds = portal.get(API + "datastore_search").respond(json=ok(DATASTORE_SEARCH_RESULT))
-    out = data(await call("preview_resource", {"resource_id": DATASTORE_RESOURCE["id"], "max_rows": 3}))
-    p = params_of(ds)
-    assert p["resource_id"] == DATASTORE_RESOURCE["id"]
-    assert p["limit"] == "3"
-    assert out["read_from"] == "datastore"
-    assert out["total_rows"] == 30
-    assert out["columns"] == ["Stadtteil", "Jahr", "Einwohner", "Anteil_%"]
-    assert out["rows"][1]["Stadtteil"] == "Düsternbrook"
-
-
-async def test_preview_datastore_is_not_cached(portal):
-    dataset_for_source(portal)
-    portal.get(API + "resource_show").respond(json=ok(DATASTORE_RESOURCE))
-    ds = portal.get(API + "datastore_search").respond(json=ok(DATASTORE_SEARCH_RESULT))
-    async with Client(server.mcp) as c:
-        await c.call_tool("preview_resource", {"resource_id": DATASTORE_RESOURCE["id"]})
-        await c.call_tool("preview_resource", {"resource_id": DATASTORE_RESOURCE["id"]})
-    assert ds.call_count == 2
-
-
-async def test_preview_datastore_failure_falls_back_to_download(portal):
-    dataset_for_source(portal)
-    portal.get(API + "resource_show").respond(json=ok(DATASTORE_RESOURCE))
-    ds = portal.get(API + "datastore_search").respond(
-        404, json={"success": False, "error": {"message": "Resource \"e9b8\" was not found.", "__type": "Not Found Error"}}
-    )
-    dl = portal.get(DATASTORE_RESOURCE["url"].removeprefix(BASE)).respond(content=CSV_BYTES, headers={"Content-Type": "text/csv"})
-    out = data(await call("preview_resource", {"resource_id": DATASTORE_RESOURCE["id"]}))
-    assert ds.call_count == 1 and dl.call_count == 1
-    assert out["read_from"] == "download"
-    assert out["kind"] == "csv"
-
-
 async def test_preview_without_url(portal):
     dataset_for_source(portal)
     portal.get(API + "resource_show").respond(json=ok(WMS_RESOURCE))
@@ -537,72 +495,54 @@ async def test_preview_argument_validation(portal, args):
 
 
 # ---------------------------------------------------------------------------
-# query_datastore
+# descriptor files and the removed DataStore tool
 # ---------------------------------------------------------------------------
 
+TDR_RESOURCE = {
+    "id": "0d0d0d0d-7777-4777-8777-777777777777",
+    "package_id": CSV_RESOURCE["package_id"],
+    "name": "einwohner_2023.json",
+    "format": "http://publications.europa.eu/resource/authority/file-type/JSON",
+    "mimetype": "application/json",
+    "url": f"{BASE}/dataset/kiel-bevoelkerung-stadtteile/resource/0d0d/download/einwohner_2023-tdr.json",
+}
+TDR_BODY = {
+    "path": CSV_RESOURCE["url"],
+    "name": "einwohner_2023",
+    "profile": "tabular-data-resource",
+    "format": "csv",
+    "encoding": "utf-8",
+    "dialect": {"csv": {"delimiter": ";"}},
+    "schema": {"fields": [{"type": "string", "name": "Stadtteil"}, {"type": "integer", "name": "Einwohner"}]},
+}
 
-async def test_query_datastore_all_params(portal):
+
+def descriptor_routes(portal):
     dataset_for_source(portal)
-    portal.get(API + "resource_show").respond(json=ok(DATASTORE_RESOURCE))
-    route = portal.get(API + "datastore_search").respond(json=ok(DATASTORE_SEARCH_RESULT))
-    out = data(
-        await call(
-            "query_datastore",
-            {
-                "resource_id": DATASTORE_RESOURCE["id"],
-                "q": "Gaarden",
-                "filters": {"Jahr": "2023", "Stadtteil": ["Düsternbrook", "Wik"]},
-                "fields": ["Stadtteil", "Einwohner"],
-                "sort": "Einwohner desc",
-                "limit": 3,
-                "offset": 6,
-            },
-        )
-    )
-    p = params_of(route)
-    assert p["resource_id"] == DATASTORE_RESOURCE["id"]
-    assert p["q"] == "Gaarden"
-    assert json.loads(p["filters"]) == {"Jahr": "2023", "Stadtteil": ["Düsternbrook", "Wik"]}
-    assert p["fields"] == "Stadtteil,Einwohner"
-    assert p["sort"] == "Einwohner desc"
-    assert (p["limit"], p["offset"]) == ("3", "6")
-    assert out["total_rows"] == 30
-    assert out["columns"] == [
-        {"id": "Stadtteil", "type": "text"},
-        {"id": "Jahr", "type": "int"},
-        {"id": "Einwohner", "type": "int"},
-        {"id": "Anteil_%", "type": "numeric"},
-    ]
-    assert len(out["rows"]) == 3
+    portal.get(API + "resource_show").respond(json=ok(TDR_RESOURCE))
+    portal.get(TDR_RESOURCE["url"].removeprefix(BASE)).respond(json=TDR_BODY)
 
 
-async def test_query_datastore_minimal_omits_optional_params(portal):
-    dataset_for_source(portal)
-    portal.get(API + "resource_show").respond(json=ok(DATASTORE_RESOURCE))
-    route = portal.get(API + "datastore_search").respond(json=ok(DATASTORE_SEARCH_RESULT))
-    data(await call("query_datastore", {"resource_id": "abc", "filters": {}}))
-    p = params_of(route)
-    assert set(p.keys()) == {"resource_id", "limit", "offset"}
-    assert (p["limit"], p["offset"]) == ("100", "0")
+async def test_preview_descriptor_points_to_the_data_resource(portal):
+    descriptor_routes(portal)
+    out = data(await call("preview_resource", {"resource_id": TDR_RESOURCE["id"]}))
+    assert out["kind"] == "descriptor"
+    assert out["describes_url"] == CSV_RESOURCE["url"]
+    assert out["data_resource_id"] == CSV_RESOURCE["id"]
+    assert out["fields"] == [{"name": "Stadtteil", "type": "string"}, {"name": "Einwohner", "type": "integer"}]
+    assert "not data" in out["note"]
 
 
-async def test_query_datastore_portal_without_datastore(portal):
-    portal.get(API + "datastore_search").respond(400, json="Bad request - Action name not known: datastore_search")
-    assert "this portal has no DataStore" in err(await call("query_datastore", {"resource_id": "abc"}))
+async def test_analyze_descriptor_names_the_resource_to_use(portal):
+    server._RECORDS_CACHE.clear()
+    descriptor_routes(portal)
+    message = err(await call("analyze_resource", {"resource_id": TDR_RESOURCE["id"]}))
+    assert "descriptor" in message
+    assert f"resource_id '{CSV_RESOURCE['id']}'" in message
 
 
-async def test_query_datastore_not_in_datastore(portal):
-    portal.get(API + "datastore_search").respond(
-        404, json={"success": False, "error": {"message": "Resource \"abc\" was not found.", "__type": "Not Found Error"}}
-    )
-    assert 'Resource "abc" was not found.' in err(await call("query_datastore", {"resource_id": "abc"}))
-
-
-async def test_query_datastore_validation_error_409(portal):
-    portal.get(API + "datastore_search").respond(
-        409, json={"success": False, "error": {"__type": "Validation Error", "filters": ["Unbekannte Spalte"]}}
-    )
-    assert "Validation Error" in err(await call("query_datastore", {"resource_id": "abc", "filters": {"X": 1}}))
+async def test_query_datastore_is_gone(portal):
+    assert "Unknown tool" in err(await call("query_datastore", {"resource_id": "abc"}))
 
 
 # ---------------------------------------------------------------------------
