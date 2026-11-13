@@ -150,15 +150,10 @@ class TestOtherFormats:
         assert out["kind"] == "text"
 
     def test_binary_fallback_by_format(self):
-        out = build_preview(b"PK\x03\x04" + b"\x00" * 100, "XLSX", "application/octet-stream", 5, False)
+        out = build_preview(b"\x00\x00\x27\x0a" + b"\x00" * 100, "SHP", "application/octet-stream", 5, False)
         assert out["kind"] == "binary"
         assert out["bytes_read"] == 104
-        assert "'xlsx'" in out["note"]
-
-    def test_xlsx_real_content_type_is_binary(self):
-        ctype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        out = build_preview(b"PK\x03\x04" + b"\x00" * 100, "XLSX", ctype, 5, False)
-        assert out["kind"] == "binary"
+        assert "'shp'" in out["note"]
 
     def test_binary_fallback_by_content_type(self):
         out = build_preview(b"%PDF-1.7", "", "application/pdf", 5, False)

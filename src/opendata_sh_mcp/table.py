@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import Any
 
 _NUMERIC_CELL = re.compile(r"^[+-]?[\d.,]*\d[\d.,]*([eE][+-]?\d+)?\s*%?$")
 # Placeholders statistical offices write where a number is missing or secret.
@@ -23,31 +24,38 @@ MAX_TEXT = 4000
 @dataclass
 class Table:
     header: list[str] = field(default_factory=list)
-    body: list[list[str]] = field(default_factory=list)
+    body: list[list[Any]] = field(default_factory=list)
     units: dict[str, str] | None = None
     leading_text: str | None = None  # title lines above the table
     footer: str | None = None  # legend or notes below it
     header_note: str | None = None  # how the column names were derived, when not from one plain row
 
 
-def _blank(row: list[str]) -> bool:
-    return not any(cell.strip() for cell in row)
+def _s(cell: Any) -> str:
+    """Cell as stripped text. CSV cells are strings; spreadsheet cells may be numbers."""
+    return cell.strip() if isinstance(cell, str) else ("" if cell is None else str(cell))
 
 
-def _is_numeric(cell: str) -> bool:
-    return bool(_NUMERIC_CELL.match(cell.strip()))
+def _blank(row: list[Any]) -> bool:
+    return not any(_s(cell) for cell in row)
 
 
-def _width(row: list[str]) -> int:
+def _is_numeric(cell: Any) -> bool:
+    if isinstance(cell, (int, float)) and not isinstance(cell, bool):
+        return True
+    return bool(_NUMERIC_CELL.match(_s(cell)))
+
+
+def _width(row: list[Any]) -> int:
     """Number of cells up to the last non-empty one."""
     n = len(row)
-    while n and not row[n - 1].strip():
+    while n and not _s(row[n - 1]):
         n -= 1
     return n
 
 
 def _as_text(rows: list[list[str]]) -> str | None:
-    lines = [" | ".join(c.strip() for c in r[: _width(r)] if c.strip()) for r in rows if not _blank(r)]
+    lines = [" | ".join(_s(c) for c in r[: _width(r)] if _s(c)) for r in rows if not _blank(r)]
     return "\n".join(lines)[:MAX_TEXT] or None
 
 
@@ -66,7 +74,7 @@ def _numeric_columns(rows: list[list[str]], width: int) -> set[int]:
     """Columns whose filled cells are numbers in at least 80% of the sampled rows."""
     cols = set()
     for c in range(width):
-        cells = [r[c].strip() for r in rows if c < len(r) and r[c].strip()]
+        cells = [r[c] for r in rows if c < len(r) and _s(r[c])]
         if cells and sum(_is_numeric(x) for x in cells) >= 0.8 * len(cells):
             cols.add(c)
     return cols
@@ -75,9 +83,9 @@ def _numeric_columns(rows: list[list[str]], width: int) -> set[int]:
 def _label_row(row: list[str], numeric_cols: set[int]) -> bool:
     """A row of labels (second header line or units), not data: no numbers anywhere, and text
     rather than a missing-value marker in at least one column that otherwise holds numbers."""
-    cells = [c.strip() for c in row]
-    if any(_is_numeric(c) for c in cells if c):
+    if any(_is_numeric(c) for c in row if _s(c)):
         return False
+    cells = [_s(c) for c in row]
     in_numeric = [cells[c] for c in numeric_cols if c < len(cells) and cells[c]]
     return bool(in_numeric) and not any(c in _MISSING_MARKERS for c in in_numeric)
 
@@ -85,13 +93,13 @@ def _label_row(row: list[str], numeric_cols: set[int]) -> bool:
 def _forward_fill(row: list[str], width: int) -> list[str]:
     out, last = [], ""
     for c in range(width):
-        cell = row[c].strip() if c < len(row) else ""
+        cell = _s(row[c]) if c < len(row) else ""
         last = cell or last
         out.append(last)
     return out
 
 
-def detect_table(rows: list[list[str]]) -> Table:
+def detect_table(rows: list[list[Any]]) -> Table:
     """Split raw rows into title lines, column names, units, data and trailing notes."""
     filled = [(i, r) for i, r in enumerate(rows) if not _blank(r)]
     if not filled:
@@ -101,7 +109,12 @@ def detect_table(rows: list[list[str]]) -> Table:
     width = max(width, 1)
 
     # Title lines: rows much narrower than the table, before its first full-width row.
-    start = next((i for i, r in filled if _width(r) > max(1, width // 2)), filled[0][0]) if width >= 2 else filled[0][0]
+    # A title row can still be wide when a source note sits far to its right, so also ask for
+    # a fair share of filled cells.
+    def is_table_row(r: list[Any]) -> bool:
+        return _width(r) > max(1, width // 2) and sum(1 for c in r if _s(c)) >= max(2, width / 3)
+
+    start = next((i for i, r in filled if is_table_row(r)), filled[0][0]) if width >= 2 else filled[0][0]
     table = Table(leading_text=_as_text(rows[:start]))
 
     # Trailing section: after a blank line, a row much narrower than the table starts a legend.
@@ -121,13 +134,13 @@ def detect_table(rows: list[list[str]]) -> Table:
     width = max(width, max(_width(r) for r in block))  # never cut a cell off a wider row
     sample = block[1 : 1 + _SAMPLE_ROWS]
     numeric_cols = _numeric_columns(sample[2:] or sample, width)
-    first = [c.strip() for c in block[0]]
+    first = [_s(c) for c in block[0]]
 
     # No header at all: the first row has numbers where the data has numbers, and one of its
     # texts shows up again further down the same column (a column name would not).
     first_numeric_ok = bool(numeric_cols) and all(c < len(first) and _is_numeric(first[c]) for c in numeric_cols)
     repeats = any(
-        cell and not _is_numeric(cell) and any(c < len(r) and r[c].strip() == cell for r in sample)
+        cell and not _is_numeric(cell) and any(c < len(r) and _s(r[c]) == cell for r in sample)
         for c, cell in enumerate(first)
     )
     all_numeric = bool(first) and all(_is_numeric(c) for c in first if c) and len(numeric_cols) == width
@@ -137,14 +150,15 @@ def detect_table(rows: list[list[str]]) -> Table:
         table.body = [_pad(r, width) for r in block]
         return table
 
-    names = _pad(first, width)
+    names = first[:width] + [""] * (width - len(first))
     skip = 1
     if len(block) >= 3 and _label_row(block[1], numeric_cols) and not _label_row(block[2], numeric_cols):
-        second = _pad([c.strip() for c in block[1]], width)
-        if "" in names and "" not in second:
-            # Group labels over sub-headers: "0-17 Jahre | (blank)" above "Anzahl | %".
+        second = [_s(c) for c in _pad(block[1], width)]
+        if "" in names and all(n or s for n, s in zip(names, second)):
+            # Group labels over sub-headers: "0-17 Jahre | (blank)" above "Anzahl | %". A column
+            # with a name of its own and nothing below it ("Alter") keeps that name.
             groups = _forward_fill(names, width)
-            names = [f"{g} {s}".strip() if g != s else s for g, s in zip(groups, second)]
+            names = [(f"{g} {s}".strip() if g != s else s) if s else n for n, g, s in zip(names, groups, second)]
             table.header_note = "column names combine two header rows (group label, then sub-header)"
         else:
             table.units = {h: u for h, u in zip(_unique(names), second) if u} or None
@@ -154,6 +168,6 @@ def detect_table(rows: list[list[str]]) -> Table:
     return table
 
 
-def _pad(row: list[str], width: int) -> list[str]:
-    cells = [c.strip() for c in row[:width]]
+def _pad(row: list[Any], width: int) -> list[Any]:
+    cells = [c.strip() if isinstance(c, str) else ("" if c is None else c) for c in row[:width]]
     return cells + [""] * (width - len(cells))
