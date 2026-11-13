@@ -11,12 +11,12 @@ a CKAN catalogue run by the state.
 | `search_datasets` | Full-text search with filters (organization, category, tags, format, license, modified since), sorting and paging |
 | `get_dataset` | Full metadata of one dataset: publisher, license, time range, tags, resources |
 | `get_resource` | Metadata of one file or service endpoint |
-| `preview_resource` | Parsed first rows of CSV (auto-detects `;` and cp1252), structure of JSON/GeoJSON, head of XML. Uses the DataStore on portals that have one |
+| `preview_resource` | Parsed first rows of CSV (detects delimiter, encoding, title lines, two-row headers, missing headers, ZIP-wrapped files), structure of JSON/GeoJSON, head of XML. Uses the DataStore on portals that have one |
 | `query_datastore` | Filter, search, sort and page rows of a DataStore table (the SH portal has no DataStore, so this reports that clearly; kept for other CKAN portals) |
 | `list_organizations` | Publishers with dataset counts |
 | `list_groups` | Thematic categories with dataset counts |
 | `preview_series_latest` | Newest release of a data series (Datenserie) via `/collection/<name>/aktuell`, previewing its best file (CSV first) |
-| `analyze_resource` | Exact figures over the whole file (CSV, JSON records, GeoJSON): row filters, group-by, count, count_distinct, sum, mean, median, min, max. Parses German numbers (`1.234,5`, `7,3e-02`) and dates (`29.09.2026 13:00`); separates units rows and trailing legends from data |
+| `analyze_resource` | Exact figures over the whole file (CSV, JSON records, GeoJSON): row filters, group-by, count, count_distinct, sum, mean, median, min, max. Parses German numbers (`1.234,5`, `7,3e-02`) and dates (`29.09.2026 13:00`); separates title lines, units rows and trailing legends from data |
 | `get_facets` | Top values of organization, groups, tags, res_format or license_id, optionally within a search |
 
 Every tool that touches data returns a `source` block (dataset and file links,

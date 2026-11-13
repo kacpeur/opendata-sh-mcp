@@ -416,7 +416,7 @@ async def _load_full(url: str, fmt: str) -> tuple[list[dict[str, Any]], dict[str
             "(raise OPENDATA_SH_MAX_ANALYZE_MB to allow bigger files)"
         )
     info: dict[str, Any] = {}
-    records = load_records(data, fmt, ctype, info)
+    records = load_records(data, fmt, ctype, info, max_unpacked=4 * cap)
     _RECORDS_CACHE.pop(url, None)
     _RECORDS_CACHE[url] = (now + client.cache_ttl, (records, info))
     while len(_RECORDS_CACHE) > _RECORDS_CACHE_SIZE:
@@ -448,7 +448,9 @@ async def analyze_resource(
     29.09.2026 13:00 work in gt/ge/lt/le filters, and min/max of a date column give the
     earliest/latest date (e.g. the newest entry). Values that are not
     numeric are skipped and counted under values_not_numeric. Call preview_resource first to see
-    the column names.
+    the column names: they can differ from the raw file (two header rows are combined, files
+    without a header get col_1, col_2, ...; header_note says so). Title lines above the table
+    come back as leading_text and notes below it as trailing_text; neither is counted as rows.
     """
     res, source = await _resource_with_source(resource_id)
     meta = resource_summary(res)

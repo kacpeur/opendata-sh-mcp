@@ -13,7 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from .ckan import PortalError
-from .preview import decode, parse_csv_table
+from .preview import ArchiveError, decode, parse_csv_table, table_extras, unwrap_zip
 
 FilterOp = Literal["eq", "ne", "gt", "ge", "lt", "le", "contains", "in", "empty", "not_empty"]
 Agg = Literal["count", "count_distinct", "sum", "mean", "median", "min", "max"]
@@ -36,6 +36,7 @@ class Metric(BaseModel):
         return f"{self.agg}({self.column or '*'})"
 
 
+_SPACES = re.compile(r"[\s\u00a0\u202f\u2009]")
 _THOUSANDS_DOT = re.compile(r"^[+-]?\d{1,3}(\.\d{3})+$")
 _NUMBER = re.compile(r"^[+-]?(\d+([.,]\d*)?|[.,]\d+)([eE][+-]?\d+)?$")
 
@@ -49,7 +50,9 @@ def to_number(value: Any, dot_decimal: bool = False) -> float | None:
         return None
     if isinstance(value, (int, float)):
         return float(value) if math.isfinite(value) else None
-    text = str(value).strip().replace(" ", "").replace(" ", "")
+    text = _SPACES.sub("", str(value)).replace("\u2212", "-")
+    if text.endswith("%"):
+        text = text[:-1]
     if not text:
         return None
     if "," in text and "." in text:
@@ -66,6 +69,33 @@ def to_number(value: Any, dot_decimal: bool = False) -> float | None:
     except ValueError:
         return None
     return num if math.isfinite(num) else None
+
+
+class NumberStyles:
+    """Decides once per column, over the whole file, whether a lone dot is a decimal point.
+
+    "1.234" is 1234 in a German export and 1.234 in an English one. A column that has dotted
+    values which cannot be thousands groups (1.5, 12.34) and no commas uses decimal points.
+    The decision must not depend on which rows a filter or group happens to select, or the
+    same cell would count as 1234 in one group and 1.234 in another.
+    """
+
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        self._records = records
+        self._dot_decimal: dict[str, bool] = {}
+
+    def dot_decimal(self, column: str | None) -> bool:
+        if column is None:
+            return False
+        if column not in self._dot_decimal:
+            texts = [v.strip() for r in self._records if isinstance(v := r.get(column), str)]
+            self._dot_decimal[column] = not any("," in t for t in texts) and any(
+                "." in t and not _THOUSANDS_DOT.match(t) and _NUMBER.match(t) for t in texts
+            )
+        return self._dot_decimal[column]
+
+    def number(self, value: Any, column: str | None) -> float | None:
+        return to_number(value, self.dot_decimal(column))
 
 
 _GERMAN_DATE = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:[ T,]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$")
@@ -88,25 +118,34 @@ def to_date(value: Any) -> datetime | None:
     return None
 
 
-def load_records(data: bytes, fmt: str, content_type: str, info: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def load_records(
+    data: bytes, fmt: str, content_type: str, info: dict[str, Any] | None = None, max_unpacked: int = 200 * 1024 * 1024
+) -> list[dict[str, Any]]:
     """Turn a whole CSV, JSON array of objects or GeoJSON file into a list of flat records.
 
-    For CSV, a units row and any trailing section are left out of the records and put in info.
+    For CSV, title lines, a units row and any trailing section are left out of the records and
+    put in info. A ZIP labelled as one of these formats is opened (up to max_unpacked bytes).
     """
     fmt = (fmt or "").lower()
     ctype = (content_type or "").lower()
-    text = decode(data)
-    if fmt in {"csv", "tsv", "txt"} or "csv" in ctype:
-        table = parse_csv_table(text)
+    try:
+        data, _, archive = unwrap_zip(data, fmt, False, max_unpacked, strict=True)
+    except ArchiveError as exc:
+        raise PortalError(str(exc)) from exc
+    if archive:
+        ctype = ""
         if info is not None:
-            if table["units"]:
-                info["units"] = table["units"]
-            if table["footer"]:
-                info["trailing_text"] = table["footer"][:4000]
+            info.update(archive)
+    if fmt in {"csv", "tsv", "txt"} or "csv" in ctype:
+        if b"\x00" in data[:4096] and data[:2] not in (b"\xff\xfe", b"\xfe\xff"):
+            raise PortalError(f"the file is labelled {fmt or 'csv'} but its content is binary, not text")
+        table = parse_csv_table(decode(data))
+        if info is not None:
+            info.update(table_extras(table))
         return [dict(zip(table["header"], r)) for r in table["body"]]
     if fmt in {"json", "geojson"} or "json" in ctype:
         try:
-            doc = json.loads(text)
+            doc = json.loads(decode(data))
         except json.JSONDecodeError as exc:
             raise PortalError(f"file is not valid JSON: {exc}") from exc
         if isinstance(doc, dict) and doc.get("type") == "FeatureCollection":
@@ -127,7 +166,7 @@ def _cell(row: dict[str, Any], column: str) -> Any:
     return value.strip() if isinstance(value, str) else value
 
 
-def _matches(row: dict[str, Any], f: RowFilter) -> bool:
+def _matches(row: dict[str, Any], f: RowFilter, styles: NumberStyles) -> bool:
     cell = _cell(row, f.column)
     empty = cell is None or cell == ""
     if f.op == "empty":
@@ -136,14 +175,14 @@ def _matches(row: dict[str, Any], f: RowFilter) -> bool:
         return not empty
     if f.op == "in":
         values = f.value if isinstance(f.value, list) else [f.value]
-        return any(_equal(cell, v) for v in values)
+        return any(_equal(cell, v, styles, f.column) for v in values)
     if f.op == "eq":
-        return _equal(cell, f.value)
+        return _equal(cell, f.value, styles, f.column)
     if f.op == "ne":
-        return not _equal(cell, f.value)
+        return not _equal(cell, f.value, styles, f.column)
     if f.op == "contains":
         return str(f.value).lower() in str(cell or "").lower()
-    a, b = to_number(cell), to_number(f.value)
+    a, b = styles.number(cell, f.column), styles.number(f.value, f.column)
     if a is None or b is None:
         if empty:
             return False
@@ -153,8 +192,8 @@ def _matches(row: dict[str, Any], f: RowFilter) -> bool:
     return {"gt": a > b, "ge": a >= b, "lt": a < b, "le": a <= b}[f.op]
 
 
-def _equal(cell: Any, value: Any) -> bool:
-    a, b = to_number(cell), to_number(value)
+def _equal(cell: Any, value: Any, styles: NumberStyles, column: str) -> bool:
+    a, b = styles.number(cell, column), styles.number(value, column)
     if a is not None and b is not None:
         return a == b
     return str(cell if cell is not None else "").strip().lower() == str(value if value is not None else "").strip().lower()
@@ -165,7 +204,7 @@ def _round(x: float) -> float | int:
     return int(x) if x.is_integer() and abs(x) < 2**53 else x
 
 
-def _compute(metric: Metric, rows: list[dict[str, Any]], unparsed: dict[str, int]) -> Any:
+def _compute(metric: Metric, rows: list[dict[str, Any]], unparsed: dict[str, int], styles: NumberStyles) -> Any:
     if metric.agg == "count":
         if metric.column is None:
             return len(rows)
@@ -174,15 +213,9 @@ def _compute(metric: Metric, rows: list[dict[str, Any]], unparsed: dict[str, int
     values = [v for v in values if v not in (None, "")]
     if metric.agg == "count_distinct":
         return len({str(v) for v in values})
-    # A column that has dotted values which cannot be German thousands (1.5, 12.34) and no
-    # commas uses the dot as decimal point throughout.
-    texts = [str(v).strip() for v in values if isinstance(v, str)]
-    dot_decimal = not any("," in t for t in texts) and any(
-        "." in t and not _THOUSANDS_DOT.match(t) for t in texts
-    )
     nums = []
     for v in values:
-        n = to_number(v, dot_decimal)
+        n = styles.number(v, metric.column)
         if n is None:
             unparsed[metric.label] = unparsed.get(metric.label, 0) + 1
         else:
@@ -224,7 +257,8 @@ def analyze(
         if m.agg != "count" and not m.column:
             raise PortalError(f"{m.agg} needs a column")
 
-    matched = [r for r in records if all(_matches(r, f) for f in filters)]
+    styles = NumberStyles(records)
+    matched = [r for r in records if all(_matches(r, f, styles) for f in filters)]
     unparsed: dict[str, int] = {}
     out: dict[str, Any] = {
         "rows_total": len(records),
@@ -232,14 +266,14 @@ def analyze(
         "columns": columns,
     }
     if not group_by:
-        out["result"] = {m.label: _compute(m, matched, unparsed) for m in metrics}
+        out["result"] = {m.label: _compute(m, matched, unparsed, styles) for m in metrics}
     else:
         buckets: dict[tuple[str, ...], list[dict[str, Any]]] = {}
         for r in matched:
             key = tuple(str(_cell(r, c) if _cell(r, c) is not None else "") for c in group_by)
             buckets.setdefault(key, []).append(r)
         groups = [
-            {"key": dict(zip(group_by, key)), **{m.label: _compute(m, rows, unparsed) for m in metrics}}
+            {"key": dict(zip(group_by, key)), **{m.label: _compute(m, rows, unparsed, styles) for m in metrics}}
             for key, rows in buckets.items()
         ]
         first = metrics[0].label

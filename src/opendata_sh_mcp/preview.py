@@ -6,12 +6,20 @@ import csv
 import io
 import json
 import re
+import struct
+import zipfile
+import zlib
+from collections import Counter
 from typing import Any
+
+from .table import detect_table
 
 TEXT_ENCODINGS = ("utf-8-sig", "cp1252", "latin-1")
 
 
 def decode(data: bytes) -> str:
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):  # UTF-16 with BOM, as Excel's "Unicode text" export writes
+        return data.decode("utf-16", errors="replace")
     for enc in TEXT_ENCODINGS:
         try:
             return data.decode(enc)
@@ -26,61 +34,70 @@ def _drop_partial_last_line(text: str, truncated: bool) -> str:
     return text
 
 
-def sniff_delimiter(text: str) -> str:
-    sample = text[:20000]
+DELIMITERS = (";", "\t", "|", ",")  # preference order when two fit equally well
+_SNIFF_LINES = 200
+
+
+def _read_rows(text: str, delimiter: str) -> list[list[str]]:
     try:
-        # German open data frequently uses ';' with ',' as decimal separator.
-        return csv.Sniffer().sniff(sample, delimiters=";,\t|").delimiter
+        # newline="" lets the csv module handle bare \r and line breaks inside quotes itself
+        return list(csv.reader(io.StringIO(text, newline=""), delimiter=delimiter))
     except csv.Error:
-        return ";" if sample.count(";") > sample.count(",") else ","
+        # broken quoting somewhere: fall back to plain splitting rather than failing the file
+        return [line.split(delimiter) for line in text.splitlines()]
 
 
-_NUMERIC_CELL = re.compile(r"^[+-]?[\d.,]+([eE][+-]?\d+)?$")
+def sniff_delimiter(text: str) -> str:
+    """Pick the delimiter that splits the most lines into the same number of fields.
 
-
-def _blank(row: list[str]) -> bool:
-    return not any(cell.strip() for cell in row)
+    csv.Sniffer guesses from character frequencies and gets German files wrong when free text
+    holds semicolons or decimal commas. Counting fields per line is more reliable: the real
+    delimiter gives one dominant field count; score it by lines at that count times fields gained.
+    """
+    lines = [ln for ln in text.splitlines()[: _SNIFF_LINES * 2] if ln.strip()][:_SNIFF_LINES]
+    sample = "\n".join(lines)
+    best, best_score = ";" if sample.count(";") > sample.count(",") else ",", 0
+    for delimiter in DELIMITERS:
+        if delimiter not in sample:
+            continue
+        counts = Counter(len(row) for row in _read_rows(sample, delimiter) if row)
+        fields, hits = max(counts.items(), key=lambda kv: (kv[1] * (kv[0] - 1), kv[0]))
+        score = hits * (fields - 1)
+        if score > best_score:
+            best, best_score = delimiter, score
+    return best
 
 
 def parse_csv_table(text: str) -> dict[str, Any]:
-    """Split a CSV export into header, units row, data rows and any trailing section.
+    """Split a CSV export into header, units row, data rows and the text around the table.
 
-    Some portal files (e.g. KFÜ-Messwerte) put units in the second line and append a
-    station list or comments after a blank line; those must not be counted as data.
+    The layout rules live in table.detect_table; this adds delimiter detection.
     """
     delimiter = sniff_delimiter(text)
-    lines = text.splitlines(keepends=True)
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-    parsed: list[tuple[int, list[str]]] = []  # (start line index, row)
-    start = 0
-    for row in reader:
-        parsed.append((start, row))
-        start = reader.line_num
-    rows = [(i, r) for i, r in parsed if not _blank(r)]
-    if not rows:
-        return {"delimiter": delimiter, "header": [], "units": None, "body": [], "footer": None}
-    header = [h.strip() for h in rows[0][1]]
-    body: list[list[str]] = []
-    footer = None
-    saw_blank = False
-    for (i, r) in parsed[parsed.index(rows[0]) + 1 :]:
-        if _blank(r):
-            saw_blank = True
-            continue
-        if saw_blank and len(header) >= 2 and len(r) < len(header) / 2:
-            footer = "".join(lines[i:]).strip()
-            break
-        saw_blank = False
-        body.append(r)
-    units = None
-    if len(body) >= 2:
-        first, second = body[0], body[1]
-        first_numeric = any(_NUMERIC_CELL.match(c.strip()) for c in first if c.strip())
-        second_numeric = any(_NUMERIC_CELL.match(c.strip()) for c in second if c.strip())
-        if not first_numeric and second_numeric and not first[0].strip():
-            units = {h: u.strip() for h, u in zip(header, first) if h and u.strip()}
-            body = body[1:]
-    return {"delimiter": delimiter, "header": header, "units": units, "body": body, "footer": footer}
+    table = detect_table(_read_rows(text, delimiter))
+    return {
+        "delimiter": delimiter,
+        "header": table.header,
+        "units": table.units,
+        "body": table.body,
+        "footer": table.footer,
+        "leading_text": table.leading_text,
+        "header_note": table.header_note,
+    }
+
+
+def table_extras(table: dict[str, Any]) -> dict[str, Any]:
+    """The parts of a parsed table that are context rather than rows, for tool output."""
+    out: dict[str, Any] = {}
+    if table.get("header_note"):
+        out["header_note"] = table["header_note"]
+    if table.get("leading_text"):
+        out["leading_text"] = table["leading_text"]  # title lines above the table
+    if table.get("units"):
+        out["units"] = table["units"]
+    if table.get("footer"):
+        out["trailing_text"] = table["footer"]  # often a legend of column codes; not data rows
+    return out
 
 
 def preview_csv(text: str, max_rows: int, truncated: bool) -> dict[str, Any]:
@@ -89,20 +106,67 @@ def preview_csv(text: str, max_rows: int, truncated: bool) -> dict[str, Any]:
     header, body = table["header"], table["body"]
     if not header:
         return {"kind": "csv", "columns": [], "rows": [], "note": "empty file"}
-    out = {
+    return {
         "kind": "csv",
         "delimiter": table["delimiter"],
         "columns": header,
         "rows": [dict(zip(header, r)) for r in body[:max_rows]],
         "rows_in_sample": len(body),
         "sample_truncated": truncated,
+        **table_extras(table),
     }
-    if table["units"]:
-        out["units"] = table["units"]
-    if table["footer"]:
-        # often a legend of column codes; worth reading, but not data rows
-        out["trailing_text"] = table["footer"][:4000]
-    return out
+
+
+TEXT_FORMATS = {"csv", "tsv", "txt", "json", "geojson"}
+_MEMBER_EXTENSIONS = {"csv": (".csv", ".txt", ".tsv"), "tsv": (".tsv", ".txt", ".csv"), "txt": (".txt", ".csv"),
+                      "json": (".json", ".geojson"), "geojson": (".geojson", ".json")}
+
+
+class ArchiveError(ValueError):
+    """A ZIP file could not be opened, or what it holds is too large."""
+
+
+def unwrap_zip(data: bytes, fmt: str, truncated: bool, max_out: int, strict: bool = False) -> tuple[bytes, bool, dict[str, Any]]:
+    """Some publishers upload a ZIP and label it CSV. Return the data file inside.
+
+    Gives (data, truncated, info). A complete archive is opened properly and the member that
+    fits the declared format is chosen. A partial download has no central directory, so only
+    its first member can be read, straight from the local file header. ``strict`` refuses to
+    return a cut-off member (exact analysis needs the whole file).
+    """
+    if not data.startswith(b"PK\x03\x04") or fmt not in TEXT_FORMATS:
+        return data, truncated, {}
+    if truncated:
+        if strict:
+            raise ArchiveError("the ZIP archive was not downloaded completely")
+        method, name_len, extra_len = struct.unpack("<H", data[8:10])[0], *struct.unpack("<HH", data[26:30])
+        name = data[30 : 30 + name_len].decode("cp437", errors="replace")
+        payload = data[30 + name_len + extra_len :]
+        if method == 8:
+            try:
+                payload = zlib.decompressobj(-15).decompress(payload, max_out)
+            except zlib.error as exc:
+                raise ArchiveError(f"cannot read the ZIP archive: {exc}") from exc
+        elif method != 0:
+            raise ArchiveError("the ZIP archive uses a compression method that is not supported")
+        return payload[:max_out], True, {"archive_member": name}
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            members = [m for m in zf.infolist() if not m.is_dir()]
+            if not members:
+                raise ArchiveError("the ZIP archive is empty")
+            wanted = _MEMBER_EXTENSIONS.get(fmt, ())
+            member = next((m for ext in wanted for m in members if m.filename.lower().endswith(ext)), members[0])
+            if strict and member.file_size > max_out:
+                raise ArchiveError(f"'{member.filename}' in the ZIP archive unpacks to {member.file_size / 1048576:.0f} MB, over the limit")
+            with zf.open(member) as fh:
+                payload = fh.read(max_out + 1)
+    except (zipfile.BadZipFile, zlib.error, NotImplementedError, RuntimeError) as exc:
+        raise ArchiveError(f"cannot read the ZIP archive: {exc}") from exc
+    info: dict[str, Any] = {"archive_member": member.filename}
+    if len(members) > 1:
+        info["archive_other_members"] = [m.filename for m in members if m is not member][:20]
+    return payload[:max_out], len(payload) > max_out, info
 
 
 def preview_json(text: str, max_rows: int, truncated: bool) -> dict[str, Any]:
@@ -139,7 +203,23 @@ def preview_json(text: str, max_rows: int, truncated: bool) -> dict[str, Any]:
 def build_preview(data: bytes, fmt: str, content_type: str, max_rows: int, truncated: bool) -> dict[str, Any]:
     fmt = (fmt or "").lower()
     ctype = (content_type or "").lower()
+    try:
+        data, truncated, archive = unwrap_zip(data, fmt, truncated, PREVIEW_UNPACK_BYTES)
+    except ArchiveError as exc:
+        return {"kind": "binary", "note": str(exc), "bytes_read": len(data)}
+    if archive:
+        ctype = ""  # the content type described the archive, not the file inside
+        return {**_build(data, fmt, ctype, max_rows, truncated), **archive}
+    return _build(data, fmt, ctype, max_rows, truncated)
+
+
+PREVIEW_UNPACK_BYTES = 2 * 1024 * 1024
+
+
+def _build(data: bytes, fmt: str, ctype: str, max_rows: int, truncated: bool) -> dict[str, Any]:
     if fmt in {"csv", "tsv", "txt"} or "csv" in ctype:
+        if b"\x00" in data[:4096] and data[:2] not in (b"\xff\xfe", b"\xfe\xff"):
+            return {"kind": "binary", "note": f"labelled {fmt or 'csv'} but the content is binary, not text", "bytes_read": len(data)}
         return preview_csv(decode(data), max_rows, truncated)
     if fmt in {"json", "geojson"} or "json" in ctype:
         return preview_json(decode(data), max_rows, truncated)
