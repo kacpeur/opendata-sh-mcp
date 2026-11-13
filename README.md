@@ -51,7 +51,7 @@ or `claude mcp add opendata-sh -- opendata-sh-mcp`.
 | Variable | Default |
 | --- | --- |
 | `OPENDATA_SH_BASE_URL` | `https://opendata.schleswig-holstein.de` |
-| `OPENDATA_SH_USER_AGENT` | `opendata-sh-mcp/0.1 (...)` (must not look like a browser or AI assistant, see below) |
+| `OPENDATA_SH_USER_AGENT` | `opendata-sh-mcp/<version> (...)` (must not look like a browser or AI assistant, see below) |
 | `OPENDATA_SH_TIMEOUT` | `30` seconds |
 | `OPENDATA_SH_CACHE_TTL` | `300` seconds for metadata calls and parsed files in `analyze_resource` |
 | `OPENDATA_SH_MAX_ANALYZE_MB` | `50`: larger files are refused by `analyze_resource` rather than analysed partially |

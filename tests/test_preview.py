@@ -14,10 +14,10 @@ from .conftest import CSV_BYTES, CSV_TEXT, GEOJSON, GEOJSON_BYTES
 
 class TestDecode:
     def test_utf8(self):
-        assert decode("Kiel – Düsternbrook".encode("utf-8")) == "Kiel – Düsternbrook"
+        assert decode("Kiel – Düsternbrook".encode()) == "Kiel – Düsternbrook"
 
     def test_utf8_bom_is_stripped(self):
-        assert decode("﻿Stadtteil;Jahr".encode("utf-8")) == "Stadtteil;Jahr"
+        assert decode("﻿Stadtteil;Jahr".encode()) == "Stadtteil;Jahr"
 
     def test_cp1252_umlauts_and_euro(self):
         raw = "Größe;Straße;Preis €;„Zitat“".encode("cp1252")
@@ -141,7 +141,7 @@ class TestJson:
 
 class TestOtherFormats:
     def test_xml_head(self):
-        xml = '<?xml version="1.0" encoding="UTF-8"?><wfs:FeatureCollection/>'.encode()
+        xml = b'<?xml version="1.0" encoding="UTF-8"?><wfs:FeatureCollection/>'
         out = build_preview(xml, "WFS", "text/xml", 5, True)
         assert out == {"kind": "wfs", "head": xml.decode(), "sample_truncated": True}
 

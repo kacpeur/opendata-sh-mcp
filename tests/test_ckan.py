@@ -256,8 +256,50 @@ class TestDownload:
 
 def test_modified_since_without_seconds_rejected():
     import pytest
+
     from opendata_sh_mcp.ckan import PortalError
     from opendata_sh_mcp.server import build_fq
 
     with pytest.raises(PortalError):
         build_fq(modified_since="2024-01-31T12:30")
+
+
+class TestHardening:
+    async def test_download_retries_overload_status(self, cc, portal, sleeps):
+        route = portal.get("/data/big.csv").mock(
+            side_effect=[httpx.Response(503), httpx.Response(200, content=b"a;b\n1;2\n", headers={"content-type": "text/csv"})]
+        )
+        data, ctype, truncated = await cc.download(BASE + "/data/big.csv", 1024)
+        assert (data, ctype, truncated) == (b"a;b\n1;2\n", "text/csv", False)
+        assert route.call_count == 2
+
+    async def test_download_gives_up_on_persistent_503(self, cc, portal, sleeps):
+        route = portal.get("/data/big.csv").respond(503)
+        with pytest.raises(PortalError, match="HTTP 503"):
+            await cc.download(BASE + "/data/big.csv", 1024)
+        assert route.call_count == 4
+
+    async def test_download_does_not_retry_404(self, cc, portal, sleeps):
+        route = portal.get("/data/gone.csv").respond(404)
+        with pytest.raises(PortalError, match="HTTP 404"):
+            await cc.download(BASE + "/data/gone.csv", 1024)
+        assert route.call_count == 1
+
+    async def test_timeout_error_names_the_failure(self, cc, portal, sleeps):
+        portal.get("/data/slow.csv").mock(side_effect=httpx.ReadTimeout(""))
+        with pytest.raises(PortalError, match="ReadTimeout"):
+            await cc.download(BASE + "/data/slow.csv", 1024)
+
+    async def test_cache_is_bounded(self, cc, portal, monkeypatch):
+        monkeypatch.setattr(ckan, "MAX_CACHE_ENTRIES", 3)
+        portal.get(API + "package_show").respond(json=ok(KIEL_PACKAGE))
+        for i in range(10):
+            await cc.action("package_show", id=f"ds-{i}")
+        assert len(cc._cache) == 3
+        assert any("ds-9" in key for key in cc._cache)
+
+    def test_user_agent_carries_package_version(self):
+        from opendata_sh_mcp import __version__
+
+        assert ckan.DEFAULT_USER_AGENT.startswith(f"opendata-sh-mcp/{__version__} ")
+        assert __version__ != "0.0.0"

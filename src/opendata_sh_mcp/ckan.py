@@ -11,11 +11,22 @@ from typing import Any
 import httpx
 from mcp.server.mcpserver.exceptions import ToolError
 
+from . import __version__
+
 DEFAULT_BASE_URL = "https://opendata.schleswig-holstein.de"
 # The portal sits behind the Anubis bot filter, which challenges browser-like
 # user agents ("Mozilla/...") and denies AI-assistant ones ("Claude-User", "ChatGPT-User").
 # A plain, descriptive agent passes as an API client.
-DEFAULT_USER_AGENT = "opendata-sh-mcp/0.1 (MCP server; python-httpx)"
+DEFAULT_USER_AGENT = f"opendata-sh-mcp/{__version__} (MCP server; python-httpx)"
+# Metadata answers are a few KB each; a long-running HTTP server must not keep them forever.
+MAX_CACHE_ENTRIES = 256
+# Overload and gateway errors are worth another try; other statuses carry a real answer.
+RETRY_STATUSES = (429, 502, 503, 504)
+
+
+def _describe(exc: Exception) -> str:
+    """httpx timeouts have an empty message, so always name the kind of failure."""
+    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 
 class PortalError(ToolError):
@@ -23,6 +34,10 @@ class PortalError(ToolError):
 
     Subclassing ToolError lets the message reach the model instead of a generic crash text.
     """
+
+
+class _RetryableStatus(Exception):
+    """A download answered with an overload status and attempts remain."""
 
 
 @dataclass
@@ -96,8 +111,17 @@ class CkanClient:
             msg = err.get("message") or err.get("__type") or str(err)
             raise PortalError(f"{name}: {msg}")
         if cache:
-            self._cache[key] = _CacheEntry(now + self.cache_ttl, body["result"])
+            self._store(key, body["result"], now)
         return body["result"]
+
+    def _store(self, key: str, value: Any, now: float) -> None:
+        self._cache.pop(key, None)
+        if len(self._cache) >= MAX_CACHE_ENTRIES:
+            for stale in [k for k, e in self._cache.items() if e.expires <= now]:
+                del self._cache[stale]
+            while len(self._cache) >= MAX_CACHE_ENTRIES:
+                del self._cache[next(iter(self._cache))]  # oldest insertion first
+        self._cache[key] = _CacheEntry(now + self.cache_ttl, value)
 
     # The portal (or the network in front of it) resets roughly one connection in four,
     # so transport errors get a few quick retries.
@@ -108,11 +132,11 @@ class CkanClient:
                 resp = await self.http.get(url, params=params)
             except httpx.TransportError as exc:
                 if attempt == attempts - 1:
-                    raise PortalError(f"network error talking to {self.base_url}: {exc}") from exc
+                    raise PortalError(f"network error talking to {self.base_url}: {_describe(exc)}") from exc
             else:
                 # CKAN answers 404/409 with a JSON error body worth surfacing, so only retry
                 # on overload or server errors.
-                if resp.status_code not in (429, 502, 503, 504) or attempt == attempts - 1:
+                if resp.status_code not in RETRY_STATUSES or attempt == attempts - 1:
                     return resp
             await asyncio.sleep(delay)
             delay *= 2
@@ -123,19 +147,23 @@ class CkanClient:
         delay = 0.5
         for attempt in range(attempts):
             try:
-                return await self._download_once(url, max_bytes)
+                return await self._download_once(url, max_bytes, retry_status=attempt < attempts - 1)
+            except _RetryableStatus:
+                pass
             except httpx.TransportError as exc:
                 if attempt == attempts - 1:
-                    raise PortalError(f"network error downloading {url}: {exc}") from exc
+                    raise PortalError(f"network error downloading {url}: {_describe(exc)}") from exc
             await asyncio.sleep(delay)
             delay *= 2
         raise AssertionError("unreachable")
 
-    async def _download_once(self, url: str, max_bytes: int) -> tuple[bytes, str, bool]:
+    async def _download_once(self, url: str, max_bytes: int, retry_status: bool = False) -> tuple[bytes, str, bool]:
         chunks: list[bytes] = []
         size = 0
         truncated = False
         async with self.http.stream("GET", url, headers={"Accept": "*/*"}) as resp:
+            if retry_status and resp.status_code in RETRY_STATUSES:
+                raise _RetryableStatus
             if resp.status_code >= 400:
                 raise PortalError(f"download failed with HTTP {resp.status_code}: {url}")
             ctype = resp.headers.get("content-type", "")
@@ -158,7 +186,7 @@ class CkanClient:
                     return str(resp.url)
             except httpx.TransportError as exc:
                 if attempt == attempts - 1:
-                    raise PortalError(f"network error opening {url}: {exc}") from exc
+                    raise PortalError(f"network error opening {url}: {_describe(exc)}") from exc
             await asyncio.sleep(delay)
             delay *= 2
         raise AssertionError("unreachable")
